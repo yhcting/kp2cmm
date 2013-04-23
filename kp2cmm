@@ -1,0 +1,450 @@
+#!/usr/bin/perl
+
+###############################################################################
+#
+# Created by Younghyung.Cho(yhcting77@gmail.com)
+#
+# Programming Policy
+# ------------------
+# DO NOT use any module that is not included as default!
+# (I don't want for user to do additional efforts to run this script!)
+#
+###############################################################################
+
+##################################
+# Running environment setup
+##################################
+use strict;
+use warnings;
+use constant {
+    debug => 0,
+    true  => 1,
+    false => 0,
+
+};
+
+# Promote all warnings to fatal error!
+$SIG{__WARN__} = sub { die @_; };
+
+##################################
+# Common utility function
+##################################
+sub dprint {
+    if (0 != debug) {
+	print @_;
+    }
+}
+
+sub dump_kpout {
+    my ($out) = @_;
+    my ($i, $h);
+    $i = 0;
+    print "=" x 62, "\n",
+          "=", " " x 24, " DUMP kpout ", " " x 24, "=", "\n\n\n",
+          "-" x 25, " registers  ", "-" x 25, "\n";
+    foreach (@{$out->{'r'}}) {
+	printf "%8x ", $_;
+	$i++;
+	if (0 == $i % 8) {
+	    print "\n";
+	}
+    }
+    print "\n\n";
+
+    print "-" x 25, " memory ", "-" x 25, "\n";
+    foreach $h (@{$out->{'m'}}) {
+	printf "[ from: 0x%8x ]\n", $h->{'s'};
+	$i = 0;
+	foreach (@{$h->{'v'}}) {
+	    printf " %8x", $_;
+	    $i++;
+	    if (0 == $i % 8) {
+		print "\n";
+	    }
+	}
+	print "\n\n"
+    }
+}
+
+# Argument
+#     $a  : reference of array to push parsed double word value.
+#     $ln : line of memory dump.
+#
+sub parse_mdumpline {
+    my ($a, $ln) = @_;
+    $ln =~ s/^[a-f0-9]{4}[ \:]//;
+    while (true) {
+	if ($ln =~ /^(\s{9})/) {
+	    $ln =~ s/$1//;
+	} elsif ($ln =~ /^( ([a-f0-9]{8}))/) {
+	    push (@$a, hex $2);
+	    $ln =~ s/$1//;
+	} elsif ($ln =~ /^( ([\*]{8}))/) {
+	    # un-accessible memory area.
+	    return 1;
+	} else {
+	    #return -1;
+	    return 1;
+	}
+    }
+    return 0;
+}
+
+##################################
+#
+# State Handlers
+#
+# Argument
+#     $out     : reference of output hash. See comment of %out for details.
+#     $i       : how many times this function is called at current section.
+#                starts from 0.
+#     $user    : value returned from this handler.
+#                at first, it is 'undef'
+#     $pln     : line of pure panic log (prefix is excluded)
+#     $linenum : line number of this panic log line at input file.
+#
+# Return
+#     handler specific private user data.
+#
+##################################
+
+sub kp_registers {
+    my ($out, $i, $user, $pln, $linenum) = @_;
+
+    # register name of kpanic to index map
+    my %rmap = (
+	# array index of registers
+	'r0'    => 0,
+	'r1'    => 1,
+	'r2'    => 2,
+	'r3'    => 3,
+	'r4'    => 4,
+	'r5'    => 5,
+	'r6'    => 6,
+	'r7'    => 7,
+	'r8'    => 8,
+	'r9'    => 9,
+	'r10'   => 10,
+	'fp'    => 11,
+	'ip'    => 12,
+	'sp'    => 13,
+	'lr'    => 14,
+	'pc'    => 15,
+	'psr'   => 16
+    );
+
+    #dprint "<INFO> <kp_registers:$i> is called\n";
+    my $ex = "\\s*([a-z0-9]{2,3})\\s*\\: \\[?\\<?([a-f0-9]{8})\\>?\\]?\\s*";
+    while ($pln =~ /$ex/) {
+	if (defined $rmap{$1}) {
+	    ${$out->{'r'}}[$rmap{$1}] = hex $2;
+	    dprint "<INFO> register $1 => $2\n";
+	} else {
+	    print "<WARN> Unexpected register name : $1 at line $linenum\n",
+	          "    $pln\n";
+	}
+	$pln =~ s/$ex//;
+    }
+    return undef;
+}
+
+# FIXME
+# -----
+#   In case of memory to dump is invalid, what is the oops log like?
+#   (This is not handled!)
+sub kp_regmem {
+    my ($out, $i, $user, $pln, $linenum) = @_;
+    #dprint "<INFO> <kp_each_register:$_[1]> is called\n";
+    if (0 == $i) {
+	# first line of section represents base memory address
+	if ($pln =~ /[A-Z0-9]{2,3}\: (0x[a-f0-9]{8})\:/) {
+	    push (@{$out->{'m'}}, {
+		's'  => hex $1,
+		'v'  => []   # annoymous array.
+	    });
+	} else {
+	    die "<ERR> Invalid format of memory dump header around register at line $linenum\n",
+	        "     $pln\n",
+	        $!;
+	}
+    } else {
+	# last added hash element is hash for this memory dump.
+	if (0 > parse_mdumpline(${$out->{'m'}}[-1]->{'v'}, $pln)) {
+	    print "<WARN> Fail to parse mem dump line at line $linenum\n",
+	          "    $pln";
+	}
+    }
+    return undef;
+}
+
+sub kp_stack {
+    my ($out, $i, $user, $pln, $linenum) = @_;
+    #dprint "<INFO> <kp_stack:$_[1]> is called\n";
+    if (0 == $i) {
+	if ($pln =~ /\(0x([a-f0-9]{8}) to 0x[a-f0-9]{8}\)/) {
+	    push (@{$out->{'m'}}, {
+		's'  => hex $1,
+		'v'  => []   # annoymous array.
+	    });
+	} else {
+	    die "<ERR> Invalid format of stack dump header at line $linenum\n",
+	        "     $pln\n",
+	        $!;
+	}
+    } else {
+	if (0 > parse_mdumpline(${$out->{'m'}}[-1]->{'v'}, $pln)) {
+	    print "<WARN> Fail to parse mem dump line at line $linenum\n",
+	          "    $pln";
+	}
+    }
+}
+
+##################################
+#
+# Main Parser
+#
+# Argument
+#     $logf : panic log file
+#     $out  : reference of output hash
+#             see comments of %kpout for details.
+#
+##################################
+sub parse_kpanic_log {
+    my ($logf, $out) = @_;
+
+    # readonly
+    my $regex_kp_prefix = '^(\<[0-9]\>)?\[[0-9\.\s]+(\,[0-9]+)?\]\s';
+
+    # global state
+    #
+    # This is readonly!.
+    my @sections = (
+	{
+	    # state for ignoring log lines...
+	    name  => 'idle',
+	    # start  : start expression - match
+	    # startno: start expression - not match
+	    # end    : end expression - match
+	    # endno  : end expression - not match
+	    # endF   : end expression - match (Force)
+	    #          this ignores 'onetime=false' option.
+	    #          this match has lower priority than end/endno.
+	    #          (that is, if line matchs end/endno,
+	    #             endF/endnoF is ignored.)
+	    # endnoF : end expression - not match (Force)
+	    #          see above for details
+	    # valid  : check for valid line for this state.
+	    # onetime: Is this one time section? (default is 'true')
+	    # func   : handler function
+	    # nrfcall: number of times function is called
+	    #          handler function may check this to process lines accordingly.
+	},
+	{
+	    # state for ignoring log lines...
+	    # See '__show_regs() : process.c' at kernel code.
+	    name      => 'start',
+	    start     => '^CPU\: [0-9]+\s+Tainted\: [A-Z ]+\([^\)]+\)',
+	},
+	{
+	    name      => 'registers',
+	    start     => '^pc \:',
+	    end       => '^Flags\: ',
+	    func      => \&kp_registers,
+	    nrfcall   => 0,
+	},
+	{
+	    name      => 'memory near register',
+	    start     => '[A-Z0-9]{2,3}\: 0x[a-f0-9]{8}\:',
+	    end       => '^\s*$', #empty line
+	    endnoF    => '^[a-f0-9]{4} ( [a-f0-9\*]{8}){8}',
+	    onetime   => false,
+	    func      => \&kp_regmem,
+	    nrfcall   => 0,
+	},
+	{
+	    name      => 'stack',
+	    start     => '^(Stack\: |Exception stack)\(',
+	    func      => \&kp_stack,
+	    nrfcall   => 0,
+	},
+	{
+	    name      => 'back trace',
+	    start     => '^\[\<[a-f0-9]{8}\>\] \(',
+	    endno     => '^\[\<[a-f0-9]{8}\>\] \(',
+	},
+	{
+	    name      => 'exception stack',
+	    start     => '^Exception stack\(0x[a-f0-9]{8}',
+	    func      => \&kp_stack,
+	    nrfcall   => 0,
+	},
+	{
+	    name      => 'back trace(exception)',
+	    start     => '^\[\<[a-f0-9]{8}\>\] \(',
+	    endno     => '^\[\<[a-f0-9]{8}\>\] \(',
+	},
+	{
+	    name      => 'idle-end',
+	},
+    );
+
+
+    # $ln     : each line of log file
+    # $logln  : pure log line (prefix is excluded)
+    # $linenum: counter for line number
+    # $seci   : section index of next section.
+    # $cs     : current section
+    # $ns     : next section
+    # $user   : section function's private argument
+    my ($ln, $logln, $linenum, $seci, $cs, $ns, $user);
+    open(FI, "<$logf")
+	or die "Can't open give log file : $logf\n$!";
+    $user = undef;
+    $linenum = 0;
+    $cs = $sections[0];
+    $ns = $sections[1];
+    $seci = 1;
+    foreach $ln (<FI>) {
+	$linenum++;
+	unless ($ln =~ /$regex_kp_prefix(.*)$/) {
+	    dprint "<WARN> Invalid kernel log : line ($linenum)\n", "    $ln";
+	    next;
+	}
+	$logln = $3;
+
+	if (defined $cs) {
+	    if ( ((defined $cs->{'end'}) && $logln =~ /$cs->{'end'}/)
+		 || ((defined $cs->{'endno'}) && !($logln =~ /$cs->{'endno'}/))) {
+		# end of current section
+		dprint "<INFO> End section $cs->{'name'} [$linenum]\n", "    $ln";
+		if (!defined $cs->{'onetime'} || true == $cs->{'onetime'}) {
+		    $cs = undef;
+		} else {
+		    $ns = $cs;
+		    $seci--; # repeat current section
+		    $cs = undef;
+		}
+	    } elsif ( ((defined $cs->{'endF'}) && $logln =~ /$cs->{'endF'}/)
+		 || ((defined $cs->{'endnoF'}) && !($logln =~ /$cs->{'endnoF'}/))) {
+		$cs = undef;
+	    }
+	}
+
+	if (defined $ns) {
+	    if ((defined $ns->{'start'}) && $logln =~ /$ns->{'start'}/) {
+		# start of next section
+		$cs = $ns;
+		$user = undef;
+		$cs->{'nrfcall'} = 0;
+		$seci++;
+		$ns = $sections[$seci];
+		dprint "<INFO> Start section $cs->{'name'} [$linenum]\n", "    $ln";
+	    }
+	}
+
+	if (defined $cs && defined $cs->{'func'}) {
+	    $user = $cs->{'func'}($out, $cs->{'nrfcall'}, $user, $logln, $linenum);
+	    $cs->{'nrfcall'}++;
+	}
+    }
+    close(FI);
+}
+
+##################################
+#
+# CMM builder to use TRACE32
+#
+##################################
+sub cmm_set_reg {
+    my ($fh, $reg, $v) = @_;
+    printf $fh "R.S $reg 0x%x\n", $v;
+}
+
+sub cmm_set_data {
+    my ($fh, $addr, $v) = @_;
+    printf $fh "D.S 0x%x %s 0x%x\n", $addr, "%long", $v;
+}
+
+# Argument
+#     $out  : reference of output hash
+#             see comments of %out for details.
+#     $cmmf : cmm script file path to be created.
+sub build_cmm {
+    my ($out, $cmmf) = @_;
+
+    my ($fh, $i, @tmp); # file handle
+    open($fh, ">$cmmf")
+	or die "Can't open output cmm file : $cmmf\n$!";
+
+    print $fh ";", "=" x 20, " Set registers ", "=" x 20, "\n\n";
+
+    # set cpsr at first
+    @tmp = @{$out->{'r'}}; # copy register array and use it.
+
+    unless (defined $tmp[-1]) {
+        die "There is no register dump in given log!\n";
+    }
+
+    cmm_set_reg($fh, "cpsr", pop (@tmp));
+
+    # set remaining registers
+    $i = 0;
+    foreach (@tmp) {
+	cmm_set_reg($fh, sprintf("r%d", $i), $_);
+	$i++;
+    }
+    print $fh "\n\n";
+    print $fh ";", "=" x 20, " Set memory data ", "=" x 20, "\n\n";
+
+    # set dumpped data
+    my ($addr, $h);
+    foreach $h (@{$out->{'m'}}) {
+	print $fh ";", "-" x 10, " mem block ", "-" x 10, "\n";
+	$addr = $h->{'s'}; # start from base address
+	foreach (@{$h->{'v'}}) {
+	    cmm_set_data($fh, $addr, $_);
+	    $addr+=4; # 4byte
+	}
+	print $fh "\n"
+    }
+
+    close($fh);
+}
+
+##################################
+#
+# Main
+#
+##################################
+
+#
+# Output format
+#
+# %out
+#     @r - > [array of register values (r0, ..., r15, psr)
+#     @m  ->
+#         {
+#             $s  -> [start address]
+#             @v  -> [values - 4byte value array]
+#         },
+#         {
+#             ...
+#         },
+#         ...
+my %kpout = (
+    'r'    => [undef, undef, undef, undef, undef,
+	       undef, undef, undef, undef, undef,
+               undef, undef, undef, undef, undef,
+               undef],
+    'm'    => []
+);
+
+if ($#ARGV < 1) {
+    print "Usage: perl kp2cmm.pl <panic log file> <output cmm file>\n";
+    die$!;
+}
+
+# $ARGV[0] : log file path
+parse_kpanic_log($ARGV[0], \%kpout);
+# dump_kpout(\%kpout);
+build_cmm(\%kpout, $ARGV[1]);

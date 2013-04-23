@@ -1,0 +1,18 @@
+#!/bin/bash
+
+sampledir=kp-samples/
+cmmout=___out___.cmm
+
+for f in $(ls $sampledir); do
+    ./kp2cmm ${sampledir}$f $cmmout
+    if [ $? -ne 0 ]; then
+        echo "FAILS : [ $f ];"
+	rm $cmmout
+	exit;
+    fi
+done
+
+if [ -e $cmmout ]; then
+    rm $cmmout
+fi
+echo "SUCCESS!"
